@@ -72,6 +72,18 @@
 .PARAMETER ShowAumid
     Print the AppUserModelID currently written on the instance shortcut.
 
+.PARAMETER Icon
+    Use this image as the instance icon instead of the generated lettered disc.
+    Any format GDI+ reads - .png, .ico, .jpg, .bmp. Non-square input is
+    letterboxed, not stretched.
+
+.PARAMETER SetIcon
+    Replace an existing instance's icon. With -Icon, uses that image; without
+    it, regenerates the lettered disc. Updates every shortcut for the instance.
+
+.PARAMETER NoRelaunch
+    Keep the menu in the current console instead of opening its own window.
+
 .PARAMETER IgnoreRunningCheck
     Last resort. Skips the "source browser is running" guard. Only use this if
     the guard is misfiring - migrating a live profile can copy a torn database.
@@ -79,7 +91,8 @@
 .EXAMPLE
     irm https://raw.githubusercontent.com/steathy/chrome-migration/main/ChromeMigrate.ps1 | iex
 
-    Runs the interactive menu with nothing to download or install by hand.
+    Opens the interactive menu in a window of its own, with nothing to download
+    or install by hand.
 
 .EXAMPLE
     & ([scriptblock]::Create((irm https://raw.githubusercontent.com/steathy/chrome-migration/main/ChromeMigrate.ps1))) -List
@@ -88,10 +101,13 @@
     scriptblock form is the one to use for command-line runs.
 
 .EXAMPLE
-    .\ChromeMigrate.ps1 -Source Vivaldi -Name Dad -IncludePasswords -DryRun
+    .\ChromeMigrate.ps1 -Source Vivaldi -Name Bob -IncludePasswords -DryRun
 
 .EXAMPLE
-    .\ChromeMigrate.ps1 -Name Dad -SetTaskbarIcon
+    .\ChromeMigrate.ps1 -Name Bob -SetTaskbarIcon
+
+.EXAMPLE
+    .\ChromeMigrate.ps1 -Name Bob -SetIcon -Icon C:\pics\bob.png
 
 .LINK
     https://github.com/steathy/chrome-migration
@@ -128,12 +144,30 @@ param(
     [string] $Shortcut,
     [string] $Aumid,
 
+    [string] $Icon,
+    [switch] $SetIcon,
+
+    [switch] $NoRelaunch,
     [switch] $Version
 )
 
 $ErrorActionPreference = 'Stop'
-$SCRIPT_VERSION = '1.0'
+$SCRIPT_VERSION = '1.1'
 $SCRIPT_HOME    = 'https://github.com/steathy/chrome-migration'
+$SCRIPT_URL     = 'https://raw.githubusercontent.com/steathy/chrome-migration/main/ChromeMigrate.ps1'
+
+# Lets the script recognise its own source text when it was pasted or piped in
+# rather than run from a file. Must appear exactly once, right here.
+$SELF_MARKER    = 'ChromeMigrate-self-4f2a91'
+
+# $MyInvocation must be read at script level - inside a function it describes
+# the function call instead. Under `iex` this picks up the CALLER's text, which
+# is why it is only trusted when it contains the marker above.
+$SELF_SOURCE = $null
+try {
+    $t = $MyInvocation.MyCommand.ScriptBlock.ToString()
+    if ($t -and $t.Contains($SELF_MARKER)) { $SELF_SOURCE = $t }
+} catch { }
 
 Add-Type -AssemblyName System.Security
 Add-Type -AssemblyName System.Drawing
@@ -266,7 +300,7 @@ function Read-Index {
 function Read-InstanceName {
     param([string]$Root)
     while ($true) {
-        $n = (Read-Host '  instance name (e.g. Dad, Lili, Banking)').Trim()
+        $n = (Read-Host '  instance name (e.g. john, alice, bob)').Trim()
         if ($n -eq '') { return $null }
         if ($n -notmatch '^[A-Za-z0-9 _.-]{1,40}$') {
             Write-Host '    letters, digits, space, dot, dash and underscore only (max 40)' -ForegroundColor DarkGray
@@ -279,6 +313,73 @@ function Read-InstanceName {
         }
         return $n
     }
+}
+
+#===========================================================================
+# Own window
+#
+# `irm ... | iex` runs inside whatever console the user happened to be in, and
+# the menu then fights for that window with their prompt and scrollback. So the
+# menu re-launches itself into a console of its own and leaves the original
+# session free. Command-line runs stay inline - their output belongs where the
+# user asked for it.
+#
+# Getting the child to run THIS code, not just some copy of it:
+#   run from a file  -> point the child at the same file
+#   piped in / pasted -> write the captured source to a temp file (see
+#                        $SELF_SOURCE), which keeps local edits intact
+#   neither           -> fall back to re-downloading the published copy
+#===========================================================================
+function Start-OwnWindow {
+    param([string]$Root)
+    if ($env:CHROMEMIGRATE_OWNWINDOW -eq '1') { return $false }   # already the child
+    if (-not [Environment]::UserInteractive) { return $false }
+
+    $hostExe = $null
+    try { $hostExe = (Get-Process -Id $PID).Path } catch { }
+    if (-not $hostExe -or -not (Test-Path $hostExe)) { $hostExe = 'powershell.exe' }
+
+    $rootQ = $Root -replace "'", "''"
+    $launch = $null
+
+    if ($PSCommandPath -and (Test-Path $PSCommandPath)) {
+        $fileQ = $PSCommandPath -replace "'", "''"
+        $launch = "& '$fileQ' -Root '$rootQ' -NoRelaunch"
+    }
+    elseif ($SELF_SOURCE) {
+        # The child removes its own copy on exit, but closing the window with
+        # the X button skips that. Sweep yesterday's leftovers while we are here.
+        try {
+            Get-ChildItem ([IO.Path]::GetTempPath()) -Filter 'ChromeMigrate_*.ps1' -EA SilentlyContinue |
+                Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-1) } |
+                ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -EA SilentlyContinue }
+        } catch { }
+        $tmp = Join-Path ([IO.Path]::GetTempPath()) ("ChromeMigrate_" + [IO.Path]::GetRandomFileName() + '.ps1')
+        try {
+            [IO.File]::WriteAllText($tmp, $SELF_SOURCE, (New-Object System.Text.UTF8Encoding($true)))
+            $tmpQ = $tmp -replace "'", "''"
+            # The child deletes the temp copy once it has been read.
+            $launch = "& '$tmpQ' -Root '$rootQ' -NoRelaunch; Remove-Item -LiteralPath '$tmpQ' -Force -EA SilentlyContinue"
+        } catch { $launch = $null }
+    }
+    if (-not $launch) {
+        $launch = "`$s = irm '$SCRIPT_URL'; & ([scriptblock]::Create(`$s)) -Root '$rootQ' -NoRelaunch"
+    }
+
+    $inner = "`$env:CHROMEMIGRATE_OWNWINDOW='1'; `$Host.UI.RawUI.WindowTitle='Chrome Profile Migrator $SCRIPT_VERSION'; $launch"
+    try {
+        Start-Process -FilePath $hostExe `
+            -ArgumentList "-NoExit -NoProfile -ExecutionPolicy Bypass -Command `"$inner`"" | Out-Null
+    } catch {
+        Warn "could not open a new window ($($_.Exception.Message)) - continuing here"
+        return $false
+    }
+    Write-Host ''
+    Ok 'opened Chrome Profile Migrator in its own window'
+    Write-Host '    This session is free again. Close that window when you are done,' -ForegroundColor DarkGray
+    Write-Host '    or re-run with -NoRelaunch to keep the menu in this one.' -ForegroundColor DarkGray
+    Write-Host ''
+    return $true
 }
 
 function Write-Banner {
@@ -375,9 +476,11 @@ function Get-BrowserProfiles {
         if (-not (Test-Path (Join-Path $d.FullName 'Preferences'))) { continue }
         $out += New-Object PSObject -Property @{ Name = $d.Name; Path = $d.FullName }
     }
-    # Unary comma: PowerShell unrolls a one-element array on return, and the
-    # caller would then get a bare PSObject whose .Count is empty.
-    return ,$out
+    # Plain return, and every caller that needs a count or an index wraps in @().
+    # Returning ,$out instead looks like it fixes the one-element unroll, but it
+    # double-wraps for those @() callers - @(f) then yields a single element that
+    # is the whole array.
+    return $out
 }
 
 function Resolve-ChromePath {
@@ -773,12 +876,98 @@ function Convert-EncryptedColumn {
 }
 
 #===========================================================================
-# Icon: coloured disc with the instance initials, as PNG-in-ICO
+# Icons
+#
+# Written as a real multi-resolution ICO: 16/24/32/48/64 as uncompressed
+# 32-bit BMP, 128/256 as PNG. Earlier versions of this tool shipped a single
+# 256px PNG-compressed entry, which is legal but leaves every shell consumer -
+# Explorer's thumbnail handler, its icon handler, the shortcut renderer, the
+# taskbar - to rescale it themselves. They do not all agree, and they cache the
+# result, which is how one folder ends up showing some icons large and some
+# small. Giving each consumer an exact-size match removes the guesswork.
 #===========================================================================
+$ICON_SIZES = @(16, 24, 32, 48, 64, 128, 256)
+
+# One BMP (DIB) image for an ICO entry: BITMAPINFOHEADER, then bottom-up BGRA,
+# then an all-zero AND mask. The header's height is doubled - that is the format
+# describing the colour and mask planes together, not a bug.
+function Get-IcoDibBytes {
+    param([System.Drawing.Bitmap]$Bmp)
+    $w = $Bmp.Width; $h = $Bmp.Height
+    $rect = New-Object System.Drawing.Rectangle(0, 0, $w, $h)
+    $data = $Bmp.LockBits($rect, [System.Drawing.Imaging.ImageLockMode]::ReadOnly,
+                          [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $stride = $data.Stride
+    $buf = New-Object byte[] ($stride * $h)
+    [Runtime.InteropServices.Marshal]::Copy($data.Scan0, $buf, 0, $buf.Length)
+    $Bmp.UnlockBits($data)
+
+    $ms = New-Object System.IO.MemoryStream
+    $bw = New-Object System.IO.BinaryWriter($ms)
+    $bw.Write([UInt32]40)            # biSize
+    $bw.Write([Int32]$w)             # biWidth
+    $bw.Write([Int32]($h * 2))       # biHeight: colour plane + mask plane
+    $bw.Write([UInt16]1)             # biPlanes
+    $bw.Write([UInt16]32)            # biBitCount
+    $bw.Write([UInt32]0)             # biCompression = BI_RGB
+    $bw.Write([UInt32]($w * $h * 4)) # biSizeImage
+    $bw.Write([Int32]0); $bw.Write([Int32]0)
+    $bw.Write([UInt32]0); $bw.Write([UInt32]0)
+    for ($y = $h - 1; $y -ge 0; $y--) { $bw.Write($buf, $y * $stride, $w * 4) }
+    $maskStride = [int][Math]::Floor((($w + 31) / 32)) * 4
+    $bw.Write((New-Object byte[] ($maskStride * $h)))
+    $bw.Flush()
+    $out = $ms.ToArray()
+    $bw.Dispose(); $ms.Dispose()
+    return ,$out
+}
+
+function Write-IcoFile {
+    param([System.Drawing.Bitmap]$Master, [string]$Path)
+    $imgs = @()
+    foreach ($s in $ICON_SIZES) {
+        $b = New-Object System.Drawing.Bitmap($s, $s, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+        $g = [System.Drawing.Graphics]::FromImage($b)
+        $g.InterpolationMode   = 'HighQualityBicubic'
+        $g.PixelOffsetMode     = 'HighQuality'
+        $g.SmoothingMode       = 'AntiAlias'
+        $g.CompositingQuality  = 'HighQuality'
+        $g.Clear([System.Drawing.Color]::Transparent)
+        $g.DrawImage($Master, (New-Object System.Drawing.Rectangle(0, 0, $s, $s)))
+        $g.Dispose()
+        if ($s -ge 128) {
+            $ms = New-Object System.IO.MemoryStream
+            $b.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+            $bytes = $ms.ToArray(); $ms.Dispose()
+        } else {
+            $bytes = Get-IcoDibBytes $b
+        }
+        $b.Dispose()
+        $imgs += , @{ Size = $s; Data = $bytes }
+    }
+
+    $ico = New-Object System.IO.MemoryStream
+    $bw  = New-Object System.IO.BinaryWriter($ico)
+    $bw.Write([UInt16]0); $bw.Write([UInt16]1); $bw.Write([UInt16]$imgs.Count)
+    $offset = 6 + (16 * $imgs.Count)
+    foreach ($i in $imgs) {
+        $dim = $i.Size; if ($dim -ge 256) { $dim = 0 }   # 0 means 256 in this field
+        $bw.Write([Byte]$dim); $bw.Write([Byte]$dim)
+        $bw.Write([Byte]0); $bw.Write([Byte]0)
+        $bw.Write([UInt16]1); $bw.Write([UInt16]32)
+        $bw.Write([UInt32]$i.Data.Length); $bw.Write([UInt32]$offset)
+        $offset += $i.Data.Length
+    }
+    foreach ($i in $imgs) { $bw.Write($i.Data) }
+    $bw.Flush()
+    [IO.File]::WriteAllBytes($Path, $ico.ToArray())
+    $bw.Dispose(); $ico.Dispose()
+}
+
 function New-InstanceIcon {
     param([string]$Text, [string]$Path, [System.Drawing.Color]$Color)
     $size = 256
-    $bmp = New-Object System.Drawing.Bitmap($size, $size)
+    $bmp = New-Object System.Drawing.Bitmap($size, $size, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.SmoothingMode = 'AntiAlias'; $g.TextRenderingHint = 'AntiAliasGridFit'
     $g.Clear([System.Drawing.Color]::Transparent)
@@ -792,19 +981,45 @@ function New-InstanceIcon {
     $white = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::White)
     $g.DrawString($letters, $font, $white, (New-Object System.Drawing.RectangleF(0,0,$size,$size)), $fmt)
     $g.Dispose()
-    $ms = New-Object System.IO.MemoryStream
-    $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
-    $png = $ms.ToArray()
-    $ms.Dispose(); $bmp.Dispose(); $brush.Dispose(); $white.Dispose(); $font.Dispose()
-    $ico = New-Object System.IO.MemoryStream
-    $bw = New-Object System.IO.BinaryWriter($ico)
-    $bw.Write([UInt16]0); $bw.Write([UInt16]1); $bw.Write([UInt16]1)
-    $bw.Write([Byte]0); $bw.Write([Byte]0); $bw.Write([Byte]0); $bw.Write([Byte]0)
-    $bw.Write([UInt16]1); $bw.Write([UInt16]32)
-    $bw.Write([UInt32]$png.Length); $bw.Write([UInt32]22)
-    $bw.Write($png); $bw.Flush()
-    [IO.File]::WriteAllBytes($Path, $ico.ToArray())
-    $bw.Dispose(); $ico.Dispose()
+    Write-IcoFile -Master $bmp -Path $Path
+    $bmp.Dispose(); $brush.Dispose(); $white.Dispose(); $font.Dispose()
+}
+
+# Turns any image the user supplies into the same multi-resolution ICO.
+# Non-square input is letterboxed onto a transparent square rather than
+# stretched, so a wide logo keeps its proportions.
+function Convert-ImageToInstanceIcon {
+    param([string]$SourceImage, [string]$Path)
+    if (-not (Test-Path -LiteralPath $SourceImage)) { Die "image not found: $SourceImage" }
+    $master = $null
+    try {
+        if ([IO.Path]::GetExtension($SourceImage) -ieq '.ico') {
+            # Ask for the biggest frame; Icon falls back to the closest it has.
+            $ic = New-Object System.Drawing.Icon($SourceImage, (New-Object System.Drawing.Size(256, 256)))
+            $src = $ic.ToBitmap()
+            $ic.Dispose()
+        } else {
+            $src = New-Object System.Drawing.Bitmap($SourceImage)
+        }
+    } catch { Die "could not read '$SourceImage' as an image: $($_.Exception.Message)" }
+
+    try {
+        $side = [Math]::Max($src.Width, $src.Height)
+        if ($side -lt 16) { Die "'$SourceImage' is only $($src.Width)x$($src.Height) - too small for an icon" }
+        $master = New-Object System.Drawing.Bitmap($side, $side, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+        $g = [System.Drawing.Graphics]::FromImage($master)
+        $g.InterpolationMode  = 'HighQualityBicubic'
+        $g.PixelOffsetMode    = 'HighQuality'
+        $g.CompositingQuality = 'HighQuality'
+        $g.Clear([System.Drawing.Color]::Transparent)
+        $g.DrawImage($src, [int](($side - $src.Width) / 2), [int](($side - $src.Height) / 2), $src.Width, $src.Height)
+        $g.Dispose()
+        Write-IcoFile -Master $master -Path $Path
+    }
+    finally {
+        if ($master) { $master.Dispose() }
+        $src.Dispose()
+    }
 }
 function Get-NameColor([string]$s) {
     $p = @(
@@ -936,6 +1151,23 @@ public static class CmLnkV1 {
 '@
 }
 
+# Separate type rather than a method on CmLnkV1: .NET cannot unload a type, so
+# adding to that class would force a version bump and break sessions that
+# already loaded it.
+if (-not ('CmShellV1' -as [type])) {
+Add-Type -Language CSharp -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class CmShellV1 {
+  [DllImport("shell32.dll")]
+  static extern void SHChangeNotify(int eventId, uint flags, IntPtr i1, IntPtr i2);
+  // SHCNE_ASSOCCHANGED tells the shell its icon associations are stale. It is
+  // the documented way to make Explorer drop cached icons without killing it.
+  public static void RefreshIcons() { SHChangeNotify(0x08000000, 0, IntPtr.Zero, IntPtr.Zero); }
+}
+'@
+}
+
 $AUMID_KEY = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\FeatureUsage\AppSwitched'
 
 # AUMID -> number of times the user has switched to it.
@@ -983,7 +1215,7 @@ function Get-ChromeInstances {
             Name = $d.Name; Path = $d.FullName; Shortcut = $lnk; Aumid = $aumid
         })
     }
-    return ,$out
+    return $out
 }
 
 function Show-Instances {
@@ -994,7 +1226,7 @@ function Show-Instances {
     Write-Host '  ---------------------------------------------' -ForegroundColor DarkGray
     if ($inst.Count -eq 0) {
         Warn "none found. Migrate one first, or pass -Root if they live elsewhere."
-        return ,$inst
+        return $inst
     }
     $i = 0
     foreach ($x in $inst) {
@@ -1005,7 +1237,7 @@ function Show-Instances {
         $aumTxt = if ($x.Aumid) { $x.Aumid } else { '(not set - taskbar will show the Chrome logo)' }
         Write-Host ("       taskbar  : {0}" -f $aumTxt) -ForegroundColor DarkGray
     }
-    return ,$inst
+    return $inst
 }
 
 #===========================================================================
@@ -1015,7 +1247,7 @@ function Show-BrowserList {
     Write-Host ''
     Write-Host '  Detected Chromium browsers' -ForegroundColor White
     Write-Host '  --------------------------' -ForegroundColor DarkGray
-    $all = Get-DetectedBrowsers
+    $all = @(Get-DetectedBrowsers)
 
     # Anything still doubled up is genuinely ambiguous: both are installed.
     $claims = @{}
@@ -1058,7 +1290,7 @@ function Show-BrowserList {
     Write-Host ''
     Write-Host '  Chrome is not listed - it is the destination.' -ForegroundColor DarkGray
     Write-Host '  Migrate with:  -Source <name> -Name <label> -IncludePasswords' -ForegroundColor Gray
-    return ,$all
+    return $all
 }
 
 #===========================================================================
@@ -1078,6 +1310,7 @@ function Invoke-Migration {
         [switch]$IncludePreferences,
         [switch]$NoShortcut,
         [string]$ShortcutPath,
+        [string]$Icon,
         [switch]$Force,
         [switch]$DryRun,
         [switch]$IgnoreRunningCheck,
@@ -1326,7 +1559,8 @@ function Invoke-Migration {
         $iconDir = Join-Path $Root '_icons'
         New-Item -ItemType Directory -Force -Path $iconDir | Out-Null
         $icon = Join-Path $iconDir "$Name.ico"
-        New-InstanceIcon -Text $Name -Path $icon -Color (Get-NameColor $Name)
+        if ($Icon) { Convert-ImageToInstanceIcon -SourceImage $Icon -Path $icon }
+        else       { New-InstanceIcon -Text $Name -Path $icon -Color (Get-NameColor $Name) }
         $lnkDir = $ShortcutPath
         if (-not $lnkDir) { $lnkDir = [Environment]::GetFolderPath('Desktop') }
         New-Item -ItemType Directory -Force -Path $lnkDir | Out-Null
@@ -1481,6 +1715,68 @@ function Install-StartMenuEntry {
     Write-Host '  Your desktop shortcut keeps its AUMID, so the taskbar pin is unaffected.' -ForegroundColor Gray
 }
 
+#===========================================================================
+# Action: replace an instance icon
+#
+# The shortcut points at <Root>\_icons\<Name>.ico, so overwriting that file is
+# enough on its own - but the shell caches shortcut icons hard, and a plain
+# overwrite usually shows no change until something invalidates the cache.
+# Rewriting the shortcut and poking SHChangeNotify does that.
+#===========================================================================
+function Set-InstanceIcon {
+    param(
+        [Parameter(Mandatory=$true)][string]$Name,
+        [string]$Root = 'C:\Browsers',
+        [string]$Image,          # blank regenerates the lettered disc
+        [string]$Shortcut
+    )
+    $iconDir = Join-Path $Root '_icons'
+    New-Item -ItemType Directory -Force -Path $iconDir | Out-Null
+    $icon = Join-Path $iconDir "$Name.ico"
+
+    if ($Image) {
+        Convert-ImageToInstanceIcon -SourceImage $Image -Path $icon
+        Ok "icon built from $Image"
+    } else {
+        New-InstanceIcon -Text $Name -Path $icon -Color (Get-NameColor $Name)
+        Ok "regenerated the lettered icon for $Name"
+    }
+    Say "icon file : $icon  ($([int]((Get-Item $icon).Length/1KB)) KB, $($ICON_SIZES.Count) sizes)"
+
+    # Re-point every shortcut that exists for this instance, desktop and Start.
+    $targets = @()
+    if ($Shortcut) {
+        $targets += $Shortcut
+    } else {
+        foreach ($d in @([Environment]::GetFolderPath('Desktop'),
+                         [Environment]::GetFolderPath('CommonDesktopDirectory'),
+                         (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'))) {
+            $c = Join-Path $d "$Name (Chrome).lnk"
+            if (Test-Path $c) { $targets += $c }
+        }
+    }
+    if ($targets.Count -eq 0) {
+        Warn "no shortcut found for '$Name' - the icon file was written, but nothing points at it yet"
+        return
+    }
+    $sh = New-Object -ComObject WScript.Shell
+    foreach ($t in $targets) {
+        # Reading the AUMID and putting it back keeps the taskbar identity, which
+        # WScript.Shell does not know about and would otherwise leave alone.
+        $keep = $null
+        try { $keep = [CmLnkV1]::Get($t) } catch { }
+        $s = $sh.CreateShortcut($t)
+        $s.IconLocation = "$icon,0"
+        $s.Save()
+        if ($keep) { try { [CmLnkV1]::Set($t, $keep) } catch { } }
+        Ok "updated $t"
+    }
+    try { [CmShellV1]::RefreshIcons() } catch { }
+    Write-Host ''
+    Write-Host '  If a pinned taskbar or Start item still shows the old picture, that pin is' -ForegroundColor Gray
+    Write-Host '  a separate copy of the shortcut - unpin and pin it again.' -ForegroundColor Gray
+}
+
 function Show-ShortcutAumid {
     param([Parameter(Mandatory=$true)][string]$Name, [string]$Shortcut)
     $lnk = Resolve-InstanceShortcut -Name $Name -Shortcut $Shortcut
@@ -1624,6 +1920,19 @@ function Invoke-MenuMigrate {
     }
 }
 
+function Invoke-MenuIcon {
+    param([string]$Root)
+    $inst = Select-Instance -Root $Root -Prompt 'change the icon of which instance? (0 = back)'
+    if (-not $inst) { return }
+    Write-Host ''
+    Write-Host '  Leave blank to regenerate the lettered disc, or give a path to your own' -ForegroundColor DarkGray
+    Write-Host '  image - .png, .ico, .jpg or .bmp. Square works best; anything else is' -ForegroundColor DarkGray
+    Write-Host '  centred on a transparent square rather than stretched.' -ForegroundColor DarkGray
+    $img = (Read-Host '  image path (blank = regenerate)').Trim().Trim('"')
+    Write-Host ''
+    Set-InstanceIcon -Name $inst.Name -Root $Root -Image $img -Shortcut $inst.Shortcut
+}
+
 function Start-Instance {
     param([string]$Root)
     $inst = Select-Instance -Root $Root -Prompt 'launch which instance? (0 = back)'
@@ -1646,9 +1955,10 @@ function Show-MainMenu {
         Write-Host '   2  Migrate a profile into an isolated Chrome instance' -ForegroundColor Gray
         Write-Host '   3  Fix the taskbar icon for an instance' -ForegroundColor Gray
         Write-Host '   4  Add an instance to the Start menu' -ForegroundColor Gray
-        Write-Host '   5  Show existing instances' -ForegroundColor Gray
-        Write-Host '   6  Launch an instance' -ForegroundColor Gray
-        Write-Host '   7  Change the instance root folder' -ForegroundColor Gray
+        Write-Host '   5  Change an instance picture (use your own image)' -ForegroundColor Gray
+        Write-Host '   6  Show existing instances' -ForegroundColor Gray
+        Write-Host '   7  Launch an instance' -ForegroundColor Gray
+        Write-Host '   8  Change the instance root folder' -ForegroundColor Gray
         Write-Host '   0  Exit' -ForegroundColor Gray
         Write-Host '  ------------------------------------------------------------' -ForegroundColor DarkGray
         $c = (Read-Host '  choice').Trim()
@@ -1665,9 +1975,10 @@ function Show-MainMenu {
                     $inst = Select-Instance -Root $Root -Prompt 'Start menu entry for which instance? (0 = back)'
                     if ($inst) { Install-StartMenuEntry -Name $inst.Name -Shortcut $inst.Shortcut }
                 }
-                '5' { Show-Instances -Root $Root | Out-Null }
-                '6' { Start-Instance -Root $Root }
-                '7' {
+                '5' { Invoke-MenuIcon -Root $Root }
+                '6' { Show-Instances -Root $Root | Out-Null }
+                '7' { Start-Instance -Root $Root }
+                '8' {
                     $r = (Read-Host "  new instance root (blank keeps $Root)").Trim()
                     if ($r) { $Root = $r; Ok "instance root is now $Root" }
                 }
@@ -1713,28 +2024,34 @@ try {
         Assert-ValidName $Name
         Set-TaskbarIdentity -Name $Name -Root $Root -Shortcut $Shortcut -Aumid $Aumid
     }
+    elseif ($SetIcon) {
+        if (-not $Name) { Die '-SetIcon needs -Name' }
+        Assert-ValidName $Name
+        Set-InstanceIcon -Name $Name -Root $Root -Image $Icon -Shortcut $Shortcut
+    }
     elseif ($Source -and -not $Menu) {
         if (-not $Name) { Die '-Source needs -Name (the label for the new instance)' }
         $r = Invoke-Migration -Source $Source -Name $Name -Root $Root `
                 -SourceProfile $SourceProfile -SourceUserData $SourceUserData -ChromePath $ChromePath `
                 -IncludePasswords:$IncludePasswords -IncludeCards:$IncludeCards `
                 -IncludeCookies:$IncludeCookies -IncludePreferences:$IncludePreferences `
-                -NoShortcut:$NoShortcut -ShortcutPath $ShortcutPath `
+                -NoShortcut:$NoShortcut -ShortcutPath $ShortcutPath -Icon $Icon `
                 -Force:$Force -DryRun:$DryRun -IgnoreRunningCheck:$IgnoreRunningCheck
         if ($r) {
             Write-Host ''
             Write-Host '  Next:' -ForegroundColor Gray
             Write-Host '    1. Launch it, verify bookmarks / history / passwords' -ForegroundColor DarkGray
-            Write-Host "    2. -Name $Name -SetTaskbarIcon   (taskbar icon)" -ForegroundColor DarkGray
-            Write-Host "    3. -Name $Name -StartMenu        (Start menu pin)" -ForegroundColor DarkGray
+            Write-Host "    2. -Name $Name -SetTaskbarIcon         (taskbar icon)" -ForegroundColor DarkGray
+            Write-Host "    3. -Name $Name -StartMenu              (Start menu pin)" -ForegroundColor DarkGray
+            Write-Host "    4. -Name $Name -SetIcon -Icon pic.png  (your own picture)" -ForegroundColor DarkGray
             Write-Host ''
         }
     }
     elseif ($Name -and -not $Source -and -not $Menu) {
-        Die "-Name on its own does nothing. Add -Source <browser>, -SetTaskbarIcon, -StartMenu or -ShowAumid."
+        Die "-Name on its own does nothing. Add -Source <browser>, -SetTaskbarIcon, -SetIcon, -StartMenu or -ShowAumid."
     }
     else {
-        Show-MainMenu -Root $Root
+        if ($NoRelaunch -or -not (Start-OwnWindow -Root $Root)) { Show-MainMenu -Root $Root }
     }
 }
 catch {
