@@ -102,7 +102,10 @@ param(
     [switch] $List,
 
     [string] $Source,
-    [ValidatePattern('^[A-Za-z0-9 _.-]{1,40}$')]
+    # Deliberately no [ValidatePattern] here. `iex` applies param-block
+    # attributes eagerly, so an unset -Name arrives as '' and would fail
+    # validation before the script runs at all - which breaks the
+    # `irm <url> | iex` entry point entirely. Assert-ValidName covers it.
     [string] $Name,
 
     [string] $Root = 'C:\Browsers',
@@ -143,6 +146,14 @@ function Warn($m) { Write-Host "[!] $m" -ForegroundColor Yellow }
 # this script is run through `irm | iex`, so failures travel as an exception
 # carrying a marker the top-level handler recognises and prints plainly.
 function Die ($m) { throw "ABORT::$m" }
+
+# Instance names become folder and file names, so keep them boring.
+function Assert-ValidName {
+    param([string]$Name)
+    if ($Name -notmatch '^[A-Za-z0-9 _.-]{1,40}$') {
+        Die "invalid -Name '$Name'. Letters, digits, space, dot, dash and underscore only, max 40."
+    }
+}
 
 function Write-Failure ($err) {
     $m = [string]$err.Exception.Message
@@ -1073,9 +1084,7 @@ function Invoke-Migration {
         [switch]$Interactive
     )
 
-    if ($Name -notmatch '^[A-Za-z0-9 _.-]{1,40}$') {
-        Die "invalid -Name '$Name'. Letters, digits, space, dot, dash, underscore; max 40."
-    }
+    Assert-ValidName $Name
 
     Write-Host ''
     Write-Host "  $Source -> isolated Chrome instance '$Name'" -ForegroundColor White
@@ -1691,14 +1700,17 @@ try {
     }
     elseif ($ShowAumid) {
         if (-not $Name) { Die '-ShowAumid needs -Name' }
+        Assert-ValidName $Name
         Show-ShortcutAumid -Name $Name -Shortcut $Shortcut
     }
     elseif ($StartMenu -and -not $Source) {
         if (-not $Name) { Die '-StartMenu needs -Name' }
+        Assert-ValidName $Name
         Install-StartMenuEntry -Name $Name -Shortcut $Shortcut
     }
     elseif ($SetTaskbarIcon) {
         if (-not $Name) { Die '-SetTaskbarIcon needs -Name' }
+        Assert-ValidName $Name
         Set-TaskbarIdentity -Name $Name -Root $Root -Shortcut $Shortcut -Aumid $Aumid
     }
     elseif ($Source -and -not $Menu) {
