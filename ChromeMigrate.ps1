@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Chrome Profile Migrator 1.2.3 - moves a profile out of any Chromium-based
+    Chrome Profile Migrator 1.2.4 - moves a profile out of any Chromium-based
     browser into an isolated Chrome instance backed by its own --user-data-dir,
     then gives that instance its own taskbar button and Start menu entry.
 
@@ -154,7 +154,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$SCRIPT_VERSION = '1.2.3'
+$SCRIPT_VERSION = '1.2.4'
 $SCRIPT_HOME    = 'https://github.com/steathy/chrome-migration'
 $SCRIPT_URL     = 'https://raw.githubusercontent.com/steathy/chrome-migration/main/ChromeMigrate.ps1'
 
@@ -279,12 +279,16 @@ $BROWSERS = @(
     # Application, not next to it as other Chromium builds do. Both lists try
     # portable first, so with both present the portable pair is the one used.
     # A portable copy anywhere else: pass -SourceUserData.
+    # Saved logins are not in Login Data but in 'Mx Login Data' - Chromium's
+    # table, with password_value holding base64 text from Maxthon's own
+    # encryption rather than a v10 or DPAPI blob. Cookies are ordinary v10.
     @{ Name='Maxthon';
        UserData=@("$PF\MaxthonPortable\User Data","$PX\MaxthonPortable\User Data",
                   "$LA\Maxthon\Application\User Data");
        Exe=@("$PF\MaxthonPortable\Maxthon.exe","$PX\MaxthonPortable\Maxthon.exe",
              "$LA\Maxthon\Application\Maxthon.exe",
-             "$PF\Maxthon\Application\Maxthon.exe","$PX\Maxthon\Application\Maxthon.exe") }
+             "$PF\Maxthon\Application\Maxthon.exe","$PX\Maxthon\Application\Maxthon.exe");
+       LoginFiles=@('Mx Login Data'); ProprietaryCrypto=$true }
     @{ Name='Blisk';       UserData=@("$LA\Blisk\User Data");
        Exe=@("$LA\Blisk\Application\blisk.exe","$PF\Blisk\Application\blisk.exe","$PX\Blisk\Application\blisk.exe") }
     @{ Name='Chromium';    UserData=@("$LA\Chromium\User Data");
@@ -424,27 +428,33 @@ function Write-Banner {
 # Browser detection
 #===========================================================================
 
-# Pulls os_crypt.encrypted_key out of a Local State file.
+# A Local State (or similar) file as nested dictionaries, or $null.
 # Windows PowerShell's ConvertFrom-Json builds a PSCustomObject and throws on
 # empty or case-duplicate property names, which several Chromium forks emit
-# (Vivaldi does). Fall back to a tolerant parser, then to plain text extraction.
+# (Vivaldi does), so this uses a tolerant parser instead.
+function Read-JsonFile {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    try {
+        $raw = [IO.File]::ReadAllText($Path, [Text.Encoding]::UTF8)
+        if ($PSVersionTable.PSVersion.Major -ge 6) { return ($raw | ConvertFrom-Json -AsHashtable) }
+        Add-Type -AssemblyName System.Web.Extensions -ErrorAction Stop
+        $ser = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+        $ser.MaxJsonLength  = [int]::MaxValue
+        $ser.RecursionLimit = 512
+        return $ser.DeserializeObject($raw)
+    } catch { return $null }
+}
+
+# Pulls os_crypt.encrypted_key out of a Local State file, falling back to plain
+# text extraction when even the tolerant parser gives up.
 function Get-OsCryptKeyB64 {
     param([string]$Path)
+    $o = Read-JsonFile $Path
+    if ($o -and $o['os_crypt'] -and $o['os_crypt']['encrypted_key']) {
+        return [string]$o['os_crypt']['encrypted_key']
+    }
     $raw = [IO.File]::ReadAllText($Path, [Text.Encoding]::UTF8)
-    try {
-        if ($PSVersionTable.PSVersion.Major -ge 6) {
-            $o = $raw | ConvertFrom-Json -AsHashtable
-        } else {
-            Add-Type -AssemblyName System.Web.Extensions -ErrorAction Stop
-            $ser = New-Object System.Web.Script.Serialization.JavaScriptSerializer
-            $ser.MaxJsonLength  = [int]::MaxValue
-            $ser.RecursionLimit = 512
-            $o = $ser.DeserializeObject($raw)
-        }
-        if ($o -and $o['os_crypt'] -and $o['os_crypt']['encrypted_key']) {
-            return [string]$o['os_crypt']['encrypted_key']
-        }
-    } catch { }
     $m = [regex]::Match($raw, '"encrypted_key"\s*:\s*"([A-Za-z0-9+/=]+)"')
     if ($m.Success) { return $m.Groups[1].Value }
     return $null
@@ -494,18 +504,42 @@ function Get-DetectedBrowsers {
     return @($all | Where-Object { $_.Exe -or -not $ownedByInstalled[$_.UserData.ToLower()] })
 }
 
-# Profile dirs. Opera keeps everything at the root; the rest use Default / Profile N.
+# Profile dirs, the last-used one first. Opera keeps everything at the root.
+#
+# Chromium's own list of profiles is profile.info_cache in Local State, and
+# forks name the folders as they like. Maxthon keeps its real profile in
+# 'Maxthon Guest Profile' next to an empty first-run 'Default' - matching only
+# Default / Profile N picked that empty shell and migrated nothing, with every
+# step reporting success. The Default / Profile N scan stays as a fallback for
+# a Local State that is missing or unreadable.
 function Get-BrowserProfiles {
     param($B)
     $out = @()
     if ($B.RootIsProfile -and (Test-Path (Join-Path $B.UserData 'Bookmarks'))) {
-        $out += New-Object PSObject -Property @{ Name = '.'; Path = $B.UserData }
+        $out += New-Object PSObject -Property @{ Name = '.'; Path = $B.UserData; LastUsed = $false }
+    }
+
+    $names = @(); $lastUsed = $null
+    $ls = Read-JsonFile (Join-Path $B.UserData 'Local State')
+    if ($ls -and $ls['profile']) {
+        if ($ls['profile']['info_cache'] -is [System.Collections.IDictionary]) { $names += @($ls['profile']['info_cache'].Keys) }
+        $lastUsed = [string]$ls['profile']['last_used']
     }
     foreach ($d in Get-ChildItem $B.UserData -Directory -EA SilentlyContinue) {
-        if ($d.Name -ne 'Default' -and $d.Name -notlike 'Profile *') { continue }
-        if (-not (Test-Path (Join-Path $d.FullName 'Preferences'))) { continue }
-        $out += New-Object PSObject -Property @{ Name = $d.Name; Path = $d.FullName }
+        if ($d.Name -eq 'Default' -or $d.Name -like 'Profile *') { $names += $d.Name }
     }
+
+    $seen  = @{}
+    $found = @()
+    foreach ($n in $names) {
+        # A key is a folder name directly under User Data, never a path.
+        if (-not $n -or $n -match '[\\/]' -or $n -eq '..' -or $seen.ContainsKey($n.ToLower())) { continue }
+        $seen[$n.ToLower()] = $true
+        $path = Join-Path $B.UserData $n
+        if (-not (Test-Path -LiteralPath (Join-Path $path 'Preferences'))) { continue }
+        $found += New-Object PSObject -Property @{ Name = $n; Path = $path; LastUsed = ($n -eq $lastUsed) }
+    }
+    $out += @($found | Sort-Object { -not $_.LastUsed }, { $_.Name -ne 'Default' }, Name)
     # Plain return, and every caller that needs a count or an index wraps in @().
     # Returning ,$out instead looks like it fixes the one-element unroll, but it
     # double-wraps for those @() callers - @(f) then yields a single element that
@@ -792,6 +826,30 @@ function Get-RowCount([string]$dbPath, [string]$table) {
         } finally { Close-Db $db }
     } catch { return -1 }
     finally { Remove-Item $tmp -Force -EA SilentlyContinue }
+}
+
+# Bookmarks is JSON; counting "type": "url" nodes needs no parse and cannot
+# trip over a malformed file.
+function Get-BookmarkCount([string]$ProfilePath) {
+    $f = Join-Path $ProfilePath 'Bookmarks'
+    if (-not (Test-Path -LiteralPath $f)) { return 0 }
+    try { return ([regex]::Matches([IO.File]::ReadAllText($f), '"type"\s*:\s*"url"')).Count } catch { return 0 }
+}
+
+# Says what a profile actually holds. An empty profile still copies, gets a new
+# key and reports every step green, so without this a wrong pick looks exactly
+# like a successful migration.
+function Write-ProfileContent {
+    param([string]$Db, [string]$ProfilePath, [string]$ProfileName, $Others)
+    $urls = Get-RowCount $Db 'urls'
+    if ($urls -lt 0) { $urls = 0 }
+    $marks = Get-BookmarkCount $ProfilePath
+    $line  = "history: $urls URLs, bookmarks: $marks"
+    if ($urls -gt 0 -or $marks -gt 0) { Ok $line; return }
+    Warn $line
+    Warn "'$ProfileName' has no history and no bookmarks - is it the profile you actually use?"
+    $rest = @($Others | Where-Object { $_.Name -ne $ProfileName } | ForEach-Object { $_.Name })
+    if ($rest.Count -gt 0) { Warn ("  other profiles: " + ($rest -join ', ') + " - choose with -SourceProfile or in the menu") }
 }
 
 function Test-DbTable([IntPtr]$db, [string]$t) {
@@ -1389,7 +1447,8 @@ function Show-BrowserList {
             $exts = 0
             $er = Join-Path $p.Path 'Extensions'
             if (Test-Path $er) { $exts = (Get-ChildItem $er -Directory -EA SilentlyContinue).Count }
-            Write-Host ("    profile {0,-12} logins={1,-6} cards={2,-4} extensions={3}" -f $p.Name, $tot, $cards, $exts)
+            $mark = if ($p.LastUsed) { '  (last used)' } else { '' }
+            Write-Host ("    profile {0,-12} logins={1,-6} cards={2,-4} extensions={3,-4} bookmarks={4}{5}" -f $p.Name, $tot, $cards, $exts, (Get-BookmarkCount $p.Path), $mark)
         }
     }
     if ($all.Count -eq 0) { Warn 'no supported source browsers found' }
@@ -1457,7 +1516,8 @@ function Invoke-Migration {
     } else {
         $sel = $profiles[0]
         if ($profiles.Count -gt 1) {
-            Warn ("$($profiles.Count) profiles found; using '$($sel.Name)'. Others: " + (($profiles | Select-Object -Skip 1 | ForEach-Object { $_.Name }) -join ', '))
+            $why = if ($sel.LastUsed) { ' (last used)' } else { '' }
+            Warn ("$($profiles.Count) profiles found; using '$($sel.Name)'$why. Others: " + (($profiles | Select-Object -Skip 1 | ForEach-Object { $_.Name }) -join ', ') + ". Pick one with -SourceProfile.")
         }
     }
     $srcProfile = $sel.Path
@@ -1514,18 +1574,20 @@ function Invoke-Migration {
             $p = Join-Path $srcProfile $f
             if (Test-Path $p) { Write-Host ("     {0,-26} {1,9:N0} KB" -f $f, ((Get-Item $p).Length/1KB)) }
         }
+        $how = if ($B.ProprietaryCrypto) { "NOT migrated - $($B.Name)'s own encryption" } else { 're-encrypted' }
         if ($IncludePasswords) {
             foreach ($f in $B.LoginFiles) {
                 $n = Get-RowCount (Join-Path $srcProfile $f) 'logins'
-                if ($n -ge 0) { Write-Host ("     {0,-26} {1} rows (re-encrypted)" -f $f, $n) }
+                if ($n -ge 0) { Write-Host ("     {0,-26} {1} rows ({2})" -f $f, $n, $how) }
             }
         }
         if ($IncludeCards) {
             $n = Get-RowCount (Join-Path $srcProfile $B.CardDb) 'credit_cards'
-            if ($n -ge 0) { Write-Host ("     {0,-26} {1} rows (re-encrypted)" -f 'credit cards', $n) }
+            if ($n -ge 0) { Write-Host ("     {0,-26} {1} rows ({2})" -f 'credit cards', $n, $how) }
         }
         if ($IncludeCookies) { Write-Host '     Cookies                    (re-encrypted)' }
         Write-Host ''
+        Write-ProfileContent -Db (Join-Path $srcProfile 'History') -ProfilePath $srcProfile -ProfileName $sel.Name -Others $profiles
         Say "$($exts.Count) extensions found (never copied)"
         foreach ($e in $exts) {
             $flag = 'MV3 ok'; if ($e.MV -lt 3) { $flag = 'MV2 DEAD' }
@@ -1553,6 +1615,7 @@ function Invoke-Migration {
         }
     }
     Ok "copied $($copied.Count) data files: $($copied -join ', ')"
+    Write-ProfileContent -Db (Join-Path $dstProfile 'History') -ProfilePath $dstProfile -ProfileName $sel.Name -Others $profiles
 
     $lsPath = Join-Path $B.UserData 'Local State'
     if (-not (Test-Path $lsPath)) { Die "source Local State missing: $lsPath" }
@@ -1601,8 +1664,8 @@ function Invoke-Migration {
         Write-Host ''
         Warn "$($B.Name) encrypts passwords and cards with its own scheme, not Chromium's"
         Warn 'os_crypt - there is no key here to convert from, so they cannot be migrated.'
-        Warn 'Export them from the browser instead:'
-        Warn "  $($B.Name.ToLower())://settings  ->  passwords  ->  export to CSV"
+        Warn "Export them from $($B.Name) instead, if it offers that:"
+        Warn "  $($B.Name)'s settings  ->  passwords  ->  export to CSV"
         Warn '  then chrome://password-manager/settings -> Import in the new instance.'
         Warn '  Delete the CSV afterwards - it is plaintext.'
         Write-Host ''
@@ -1945,7 +2008,8 @@ function Invoke-MenuMigrate {
                 $n = Get-RowCount (Join-Path $p.Path $lf) 'logins'
                 if ($n -gt 0) { $tot += $n }
             }
-            Write-Host ("   {0,2}  {1,-12} {2} saved login(s)" -f $i, $p.Name, $tot) -ForegroundColor Cyan
+            $mark = if ($p.LastUsed) { '  (last used)' } else { '' }
+            Write-Host ("   {0,2}  {1,-12} {2} bookmark(s), {3} saved login(s){4}" -f $i, $p.Name, (Get-BookmarkCount $p.Path), $tot, $mark) -ForegroundColor Cyan
         }
         Write-Host ''
         $pp = Read-Index 'profile number (0 = back)' $profiles.Count

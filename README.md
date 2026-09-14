@@ -128,7 +128,7 @@ new folder and the shortcut.
 | `-Source <name>` | Source browser |
 | `-Name <label>` | Instance name — folder, profile name, shortcut, icon letters |
 | `-Root <path>` | Parent folder for instances. Default `C:\Browsers` |
-| `-SourceProfile <name>` | Which source profile. Default: first found |
+| `-SourceProfile <name>` | Which source profile. Default: the one last used |
 | `-SourceUserData <path>` | Override auto-detection |
 | `-ChromePath <path>` | Target executable. Default: installed Chrome |
 | `-IncludePasswords` | Migrate saved logins (both stores) |
@@ -210,8 +210,8 @@ quick way to bring older instances up to the multi-size format.
 ## Supported sources
 
 Sidekick, Edge, Brave, Vivaldi, Opera, Opera GX, Cent Browser, SRWare Iron
-(installed and portable), Comodo Dragon, Maxthon, Blisk, Chromium — and Yandex
-with a caveat.
+(installed and portable), Comodo Dragon, Blisk, Chromium — and Yandex and
+Maxthon, whose saved passwords cannot be migrated.
 
 **Chrome is not a source.** It is the destination, and Chrome-to-Chrome is just a
 folder copy.
@@ -242,6 +242,18 @@ Real per-browser differences the script handles:
   `Application` folder (`%LOCALAPPDATA%\Maxthon\Application\User Data`) rather
   than next to it. Both are detected. A portable copy unpacked anywhere else
   needs `-SourceUserData`.
+* **Maxthon** also keeps its real profile in a folder named
+  `Maxthon Guest Profile`, next to an empty `Default` left from first run.
+  Profiles are therefore taken from Chromium's own list in `Local State`
+  rather than guessed from folder names, and the one last used is offered first
+  and marked. Every migration reports how many history URLs and bookmarks it
+  moved, and warns when both are zero — an empty profile otherwise migrates
+  with every step green.
+* **Maxthon** saves passwords in `Mx Login Data`, not `Login Data`, under its
+  own encryption: the values are base64 text, not Chromium's `v10` or DPAPI
+  blobs. Like Yandex, the real count is shown and they are skipped — export
+  them from Maxthon if it offers that. Its cookies are ordinary `v10` and do
+  migrate.
 * **Vivaldi** writes a `Local State` that Windows PowerShell's `ConvertFrom-Json`
   rejects — it throws on empty and case-duplicate property names. The os_crypt
   key is read with a tolerant parser plus a text fallback.
@@ -395,6 +407,9 @@ Windows 10 Pro and Windows 11 Pro, PowerShell 5.1.
   running, and `bob` next to `bob2`
 * SRWare Iron portable detected and migrated end to end against its layout rebuilt
   in a sandbox, next to a leftover Chromium profile that it does not claim
+* Maxthon Portable 7.3: a real profile dry-run picks `Maxthon Guest Profile` over
+  the empty `Default` (210 history URLs, 7 bookmarks) and lists its 5 saved
+  logins as not migratable; the same layout with fake data migrates for real
 
 ---
 
