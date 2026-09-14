@@ -74,7 +74,8 @@ unless it is genuinely running as a file, since that would close your window.
 
 The menu re-launches itself into a fresh console so it is not fighting your
 prompt and scrollback. `-NoRelaunch` keeps it inline. Command-line runs always
-stay inline — their output belongs where you asked for it.
+stay inline — their output belongs where you asked for it. In the menu, pressing
+Enter answers **yes** to every yes/no question.
 
 ```
  1  Scan for browsers and profiles
@@ -146,7 +147,9 @@ new folder and the shortcut.
 | `-IgnoreRunningCheck` | Last resort — migrate anyway. See below |
 
 `-IncludeCookies` is off deliberately. For a banking or finance profile you
-generally *want* to log in fresh, and stale session cookies are a liability.
+generally *want* to log in fresh, and stale session cookies are a liability. The
+menu is different: Enter means yes there, cookies included, so answer `n` to that
+question for a finance profile.
 
 ---
 

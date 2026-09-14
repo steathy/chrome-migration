@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Chrome Profile Migrator 1.2.2 - moves a profile out of any Chromium-based
+    Chrome Profile Migrator 1.2.3 - moves a profile out of any Chromium-based
     browser into an isolated Chrome instance backed by its own --user-data-dir,
     then gives that instance its own taskbar button and Start menu entry.
 
@@ -154,7 +154,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$SCRIPT_VERSION = '1.2.2'
+$SCRIPT_VERSION = '1.2.3'
 $SCRIPT_HOME    = 'https://github.com/steathy/chrome-migration'
 $SCRIPT_URL     = 'https://raw.githubusercontent.com/steathy/chrome-migration/main/ChromeMigrate.ps1'
 
@@ -301,12 +301,14 @@ $CHROME_CANDIDATES = @(
 #===========================================================================
 # Small console helpers for the interactive mode
 #===========================================================================
+# Enter means yes for every question. There is deliberately no per-question
+# default, so a bare Enter never means something different from one prompt
+# to the next.
 function Read-YesNo {
-    param([string]$Question, [bool]$Default = $false)
-    $hint = if ($Default) { '[Y/n]' } else { '[y/N]' }
+    param([string]$Question)
     while ($true) {
-        $a = (Read-Host "  $Question $hint").Trim()
-        if ($a -eq '')            { return $Default }
+        $a = (Read-Host "  $Question [Y/n]").Trim()
+        if ($a -eq '')            { return $true }
         if ($a -match '^(y|yes)$'){ return $true }
         if ($a -match '^(n|no)$') { return $false }
         Write-Host '    answer y or n' -ForegroundColor DarkGray
@@ -336,7 +338,7 @@ function Read-InstanceName {
         }
         if (Test-Path (Join-Path $Root $n)) {
             Warn "$Root\$n already exists"
-            if (Read-YesNo 'overwrite it?' $false) { return $n }
+            if (Read-YesNo 'overwrite it?') { return $n }
             continue
         }
         return $n
@@ -650,7 +652,7 @@ function Assert-BrowserClosed {
         Write-Host ''
         Write-RunStateHelp $B $st
         Write-Host ''
-        if (-not (Read-YesNo "close $($B.Name) completely, then retry?" $true)) {
+        if (-not (Read-YesNo "close $($B.Name) completely, then retry?")) {
             Die "migration cancelled - $($B.Name) is running"
         }
     }
@@ -1965,11 +1967,11 @@ function Invoke-MenuMigrate {
         Warn "$($B.Name) uses its own password crypto - logins and cards cannot be converted."
         Warn 'Export them to CSV from the browser and import into the new instance instead.'
     } else {
-        $wantPw    = Read-YesNo 'saved passwords?' $true
-        $wantCards = Read-YesNo 'saved credit cards?' $false
+        $wantPw    = Read-YesNo 'saved passwords?'
+        $wantCards = Read-YesNo 'saved credit cards?'
     }
-    $wantCookies = Read-YesNo 'cookies (keeps you logged in - also carries session risk)?' $false
-    $wantPrefs   = Read-YesNo 'browser settings / preferences?' $false
+    $wantCookies = Read-YesNo 'cookies (keeps you logged in - also carries session risk)?'
+    $wantPrefs   = Read-YesNo 'browser settings / preferences?'
 
     Write-Host ''
     Write-Host '  Summary' -ForegroundColor White
@@ -1996,22 +1998,22 @@ function Invoke-MenuMigrate {
         Interactive        = $true
     }
 
-    if (Read-YesNo 'dry run first (shows what would move, writes nothing)?' $true) {
+    if (Read-YesNo 'dry run first (shows what would move, writes nothing)?') {
         Invoke-Migration @common -DryRun | Out-Null
         Write-Host ''
-        if (-not (Read-YesNo 'go ahead for real?' $true)) { Warn 'cancelled'; return }
+        if (-not (Read-YesNo 'go ahead for real?')) { Warn 'cancelled'; return }
     } else {
-        if (-not (Read-YesNo 'start migrating now?' $false)) { Warn 'cancelled'; return }
+        if (-not (Read-YesNo 'start migrating now?')) { Warn 'cancelled'; return }
     }
 
     $res = Invoke-Migration @common
     if (-not $res) { return }
 
     Write-Host ''
-    if (Read-YesNo 'set the taskbar icon for this instance now (opens it once)?' $true) {
+    if (Read-YesNo 'set the taskbar icon for this instance now (opens it once)?') {
         Set-TaskbarIdentity -Name $res.Name -Root $Root -Shortcut $res.Shortcut
         Write-Host ''
-        if (Read-YesNo 'also add it to the Start menu?' $true) {
+        if (Read-YesNo 'also add it to the Start menu?') {
             Install-StartMenuEntry -Name $res.Name -Shortcut $res.Shortcut
         }
     }
