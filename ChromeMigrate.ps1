@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Chrome Profile Migrator 1.2.1 - moves a profile out of any Chromium-based
+    Chrome Profile Migrator 1.2.2 - moves a profile out of any Chromium-based
     browser into an isolated Chrome instance backed by its own --user-data-dir,
     then gives that instance its own taskbar button and Start menu entry.
 
@@ -13,7 +13,8 @@
     reachable from the command line - see the parameter list.
 
     Sources: Sidekick, Edge, Brave, Vivaldi, Yandex, Opera, Opera GX,
-    Cent Browser, SRWare Iron, Comodo Dragon, Maxthon, Blisk, Chromium.
+    Cent Browser, SRWare Iron (installed and portable), Comodo Dragon, Maxthon,
+    Blisk, Chromium.
     Chrome itself is deliberately absent - it is the destination.
 
     Moved automatically:
@@ -153,7 +154,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$SCRIPT_VERSION = '1.2.1'
+$SCRIPT_VERSION = '1.2.2'
 $SCRIPT_HOME    = 'https://github.com/steathy/chrome-migration'
 $SCRIPT_URL     = 'https://raw.githubusercontent.com/steathy/chrome-migration/main/ChromeMigrate.ps1'
 
@@ -258,6 +259,19 @@ $BROWSERS = @(
              "$PX\SRWare Iron (64-Bit)\chrome.exe","$PX\SRWare Iron\chrome.exe",
              "$PF\SRWare Iron (64-Bit)\iron.exe","$PX\SRWare Iron\iron.exe",
              "$LA\SRWare Iron\chrome.exe") }
+    # Iron's own portable zip is a different store from the installed Iron:
+    # IronPortable.exe is only a launcher, the browser sits in Iron\ beside it
+    # and the profile in Profile\. A separate entry, so the installed Iron's
+    # claim on Chromium's directory can never be triggered by a portable copy.
+    # The launcher is the last resort - a Chrome-named binary in Iron\ gives
+    # the real version, and its folder is where the browser processes run.
+    @{ Name='IronPortable';
+       UserData=@("$PF\IronPortable64\Profile","$PX\IronPortable64\Profile",
+                  "$PF\IronPortable\Profile","$PX\IronPortable\Profile");
+       Exe=@("$PF\IronPortable64\Iron\chrome.exe","$PF\IronPortable64\Iron\iron.exe","$PF\IronPortable64\IronPortable.exe",
+             "$PX\IronPortable64\Iron\chrome.exe","$PX\IronPortable64\Iron\iron.exe","$PX\IronPortable64\IronPortable.exe",
+             "$PF\IronPortable\Iron\chrome.exe","$PF\IronPortable\Iron\iron.exe","$PF\IronPortable\IronPortable.exe",
+             "$PX\IronPortable\Iron\chrome.exe","$PX\IronPortable\Iron\iron.exe","$PX\IronPortable\IronPortable.exe") }
     @{ Name='Dragon';      UserData=@("$LA\Comodo\Dragon\User Data");
        Exe=@("$PF\Comodo\Dragon\dragon.exe","$PX\Comodo\Dragon\dragon.exe") }
     # Maxthon's portable zip unpacks to a MaxthonPortable folder and keeps

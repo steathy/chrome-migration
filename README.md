@@ -206,8 +206,9 @@ quick way to bring older instances up to the multi-size format.
 
 ## Supported sources
 
-Sidekick, Edge, Brave, Vivaldi, Opera, Opera GX, Cent Browser, SRWare Iron,
-Comodo Dragon, Maxthon, Blisk, Chromium — and Yandex with a caveat.
+Sidekick, Edge, Brave, Vivaldi, Opera, Opera GX, Cent Browser, SRWare Iron
+(installed and portable), Comodo Dragon, Maxthon, Blisk, Chromium — and Yandex
+with a caveat.
 
 **Chrome is not a source.** It is the destination, and Chrome-to-Chrome is just a
 folder copy.
@@ -226,6 +227,12 @@ Real per-browser differences the script handles:
   `-List` prints a `NOTE:` when two installed browsers genuinely conflict. A
   profile whose browser was uninstalled is still listed, so orphaned data stays
   reachable.
+* **SRWare Iron portable** is a separate source, `IronPortable`. SRWare's own zip
+  unpacks to `IronPortable64`, where `IronPortable.exe` is only a launcher: the
+  browser runs from `Iron\` beside it and the profile lives in `Profile\`. It
+  never touches Chromium's directory, so it is kept apart from the installed
+  Iron's shared-directory rule. A copy outside `Program Files` needs
+  `-SourceUserData '<folder>\Profile'`.
 * **Maxthon** ships as a portable zip as well as an installer, and the two keep
   their profile in different places: the portable build beside `Maxthon.exe`
   (`C:\Program Files\MaxthonPortable\User Data`), the installed one *inside* its
@@ -383,6 +390,8 @@ Windows 10 Pro and Windows 11 Pro, PowerShell 5.1.
 * `-SetTaskbarIcon` confirmed to write exactly the AUMID the instance's window
   reports, with no clicks — for an instance not yet running, one already
   running, and `bob` next to `bob2`
+* SRWare Iron portable detected and migrated end to end against its layout rebuilt
+  in a sandbox, next to a leftover Chromium profile that it does not claim
 
 ---
 
