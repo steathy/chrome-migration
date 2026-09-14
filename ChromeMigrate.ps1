@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Chrome Profile Migrator 1.2 - moves a profile out of any Chromium-based
+    Chrome Profile Migrator 1.2.1 - moves a profile out of any Chromium-based
     browser into an isolated Chrome instance backed by its own --user-data-dir,
     then gives that instance its own taskbar button and Start menu entry.
 
@@ -63,8 +63,9 @@
     Parent folder holding the instance data dirs. Default C:\Browsers.
 
 .PARAMETER SetTaskbarIcon
-    Capture the instance's AppUserModelID and stamp it onto its shortcut, so a
-    pinned taskbar button keeps the instance icon instead of the Chrome logo.
+    Read the instance's AppUserModelID off its window and stamp it onto its
+    shortcut, so a pinned taskbar button keeps the instance icon instead of the
+    Chrome logo. Opens the instance if it is not already running.
 
 .PARAMETER StartMenu
     Install a Start-menu copy of the instance shortcut so it can be pinned.
@@ -152,7 +153,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$SCRIPT_VERSION = '1.2'
+$SCRIPT_VERSION = '1.2.1'
 $SCRIPT_HOME    = 'https://github.com/steathy/chrome-migration'
 $SCRIPT_URL     = 'https://raw.githubusercontent.com/steathy/chrome-migration/main/ChromeMigrate.ps1'
 
@@ -1051,11 +1052,16 @@ function Get-NameColor([string]$s) {
 #
 # A shortcut's icon only applies to the shortcut. Once Chrome is running, the
 # taskbar button is driven by the window's AppUserModelID, and Chrome supplies
-# its own icon for that. Chrome does give each --user-data-dir a distinct AUMID
-# of the form 'Chrome.scopeddir<hash>.Default', so instances already group
-# separately - they just all show the Chrome logo. If a PINNED shortcut
-# declares the same AUMID, Windows merges the running window into that pinned
-# item and uses the shortcut's icon.
+# its own icon for that. Chrome does give each --user-data-dir a distinct AUMID,
+# so instances already group separately - they just all show the Chrome logo.
+# If a PINNED shortcut declares the same AUMID, Windows merges the running
+# window into that pinned item and uses the shortcut's icon.
+#
+# The AUMID is not random. Chromium builds it from the folder names -
+# C:\Browsers\bob\Default becomes 'Chrome.bob.Default' - but per-user installs
+# add a segment hashed from the Windows account, other channels change the
+# prefix, and long names are cut down the middle. Rather than re-derive all
+# that, the AUMID is read back off the instance's own window.
 #===========================================================================
 if (-not ('CmLnkV1' -as [type])) {
 Add-Type -Language CSharp -TypeDefinition @'
@@ -1181,17 +1187,88 @@ public static class CmShellV1 {
 '@
 }
 
-$AUMID_KEY = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\FeatureUsage\AppSwitched'
+# Chrome stamps System.AppUserModel.ID on its top-level windows, and
+# SHGetPropertyStoreForWindow hands that store back to anyone. Own structs and
+# interface names: those in CmLnkV1 live in another dynamic assembly.
+if (-not ('CmWindowV1' -as [type])) {
+Add-Type -Language CSharp -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
 
-# AUMID -> number of times the user has switched to it.
-function Get-SwitchCounts {
-    param([string]$Key = $AUMID_KEY)
-    $h = @{}
-    if (-not (Test-Path $Key)) { return $h }
-    foreach ($p in (Get-ItemProperty $Key).PSObject.Properties) {
-        if ($p.Name -like 'Chrome*' -and $p.Value -is [int]) { $h[$p.Name] = [int]$p.Value }
-    }
-    return $h
+[StructLayout(LayoutKind.Sequential)]
+public struct CmWinKey { public Guid fmtid; public uint pid; }
+
+[StructLayout(LayoutKind.Sequential)]
+public struct CmWinVariant {
+  public ushort vt;
+  public ushort r1, r2, r3;
+  public IntPtr p;
+  public IntPtr p2;
+}
+
+[ComImport, Guid("886d8eeb-8cf2-4446-8d02-cdba1dbdcf99"),
+ InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface ICmWinPropertyStore {
+  [PreserveSig] int GetCount(out uint c);
+  [PreserveSig] int GetAt(uint i, out CmWinKey k);
+  [PreserveSig] int GetValue(ref CmWinKey k, out CmWinVariant v);
+  [PreserveSig] int SetValue(ref CmWinKey k, ref CmWinVariant v);
+  [PreserveSig] int Commit();
+}
+
+public static class CmWindowV1 {
+  delegate bool EnumProc(IntPtr h, IntPtr l);
+  [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc cb, IntPtr l);
+  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("shell32.dll")] static extern int SHGetPropertyStoreForWindow(
+      IntPtr h, ref Guid riid, [MarshalAs(UnmanagedType.Interface)] out ICmWinPropertyStore ps);
+  [DllImport("ole32.dll")] static extern int PropVariantClear(ref CmWinVariant v);
+
+  // Distinct AUMIDs of the visible top-level windows owned by these processes,
+  // front-most first.
+  public static string[] Get(uint[] pids) {
+    HashSet<uint> want = new HashSet<uint>(pids);
+    List<string> ids = new List<string>();
+    EnumProc cb = delegate(IntPtr h, IntPtr l) {
+      uint pid;
+      GetWindowThreadProcessId(h, out pid);
+      if (!want.Contains(pid) || !IsWindowVisible(h)) return true;
+      Guid iid = typeof(ICmWinPropertyStore).GUID;
+      ICmWinPropertyStore ps;
+      if (SHGetPropertyStoreForWindow(h, ref iid, out ps) < 0 || ps == null) return true;
+      try {
+        CmWinKey k = new CmWinKey();
+        k.fmtid = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3");
+        k.pid = 5;
+        CmWinVariant v;
+        if (ps.GetValue(ref k, out v) >= 0) {
+          if (v.vt == 31) {                      // VT_LPWSTR
+            string s = Marshal.PtrToStringUni(v.p);
+            if (!String.IsNullOrEmpty(s) && !ids.Contains(s)) ids.Add(s);
+          }
+          PropVariantClear(ref v);
+        }
+      } finally { Marshal.ReleaseComObject(ps); }
+      return true;
+    };
+    EnumWindows(cb, IntPtr.Zero);
+    GC.KeepAlive(cb);
+    return ids.ToArray();
+  }
+}
+'@
+}
+
+# Processes running on exactly this data dir. The boundary after the path is
+# what keeps C:\Browsers\bob from also matching C:\Browsers\bob2.
+function Get-InstanceProcessIds {
+    param([string]$Target)
+    $pat = '--user-data-dir="?' + [regex]::Escape($Target.TrimEnd('\')) + '\\?("|\s|$)'
+    return @(Get-CimInstance Win32_Process -Filter "CommandLine LIKE '%--user-data-dir%'" -EA SilentlyContinue |
+        Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -match $pat } |
+        ForEach-Object { [uint32]$_.ProcessId })
 }
 
 function Resolve-InstanceShortcut {
@@ -1619,9 +1696,11 @@ function Invoke-Migration {
 #===========================================================================
 # Action: taskbar identity
 #
-# Capture needs one click from you: Windows only records an AUMID in
-# ...\Explorer\FeatureUsage\AppSwitched when a human switches to the window.
-# Launching it programmatically is not enough.
+# 1.2 and earlier recovered the AUMID by diffing Explorer's taskbar-switch
+# counters (...\Explorer\FeatureUsage\AppSwitched) around a prompt asking you
+# to click the window. Those counters did not reliably move within the prompt,
+# which left "nothing incremented" and no AUMID. The window itself says what
+# its AUMID is, with no clicks and nothing to wait for.
 #===========================================================================
 function Set-TaskbarIdentity {
     param(
@@ -1637,54 +1716,42 @@ function Set-TaskbarIdentity {
         $target = Join-Path $Root $Name
         if (-not (Test-Path $target)) { Die "instance data dir not found: $target" }
 
-        # AppSwitched stores a USE COUNT per AUMID. An instance you have already
-        # used is present with a count, so looking only for new names finds
-        # nothing. Diff the counts instead: the one you switch to increments.
-        $before = Get-SwitchCounts
-
         $chrome = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk).TargetPath
         if (-not (Test-Path $chrome)) { Die "shortcut target missing: $chrome" }
 
-        Say "launching $Name so Windows can register its AUMID"
-        Start-Process $chrome -ArgumentList "--user-data-dir=`"$target`" --no-first-run --no-default-browser-check about:blank"
-
-        Write-Host ''
-        Write-Host '  ACTION NEEDED' -ForegroundColor Yellow
-        Write-Host "  1. Wait for the $Name window to appear." -ForegroundColor Gray
-        Write-Host '  2. Click some OTHER window first (this console is fine).' -ForegroundColor Gray
-        Write-Host "  3. Now click the $Name TASKBAR BUTTON to switch back to it." -ForegroundColor Gray
-        Write-Host '     Repeat that switch 2-3 times - it must be a real user switch,' -ForegroundColor Gray
-        Write-Host '     and do not switch to any other Chrome window in between.' -ForegroundColor Gray
-        Write-Host '  4. Come back here and press Enter.' -ForegroundColor Gray
-        Write-Host ''
-        Read-Host '  press Enter once you have switched to it a few times' | Out-Null
-
-        $after   = Get-SwitchCounts
-        $changed = @()
-        foreach ($k in $after.Keys) {
-            $old = 0
-            if ($before.ContainsKey($k)) { $old = $before[$k] }
-            if ($after[$k] -gt $old) {
-                $changed += New-Object PSObject -Property @{ Id = $k; Delta = ($after[$k] - $old) }
-            }
+        if (@(Get-InstanceProcessIds $target).Count -gt 0) {
+            Say "$Name is already running - reading the AUMID from its window"
+        } else {
+            Say "launching $Name to read the AUMID from its window"
+            Start-Process $chrome -ArgumentList "--user-data-dir=`"$target`" --no-first-run --no-default-browser-check about:blank"
         }
 
-        if ($changed.Count -eq 0) {
-            Write-Host ''
-            Warn 'nothing incremented. Known Chrome AUMIDs on this machine:'
-            foreach ($k in ($after.Keys | Sort-Object)) { Write-Host "    $k" }
-            Die 'switch to the window via its TASKBAR BUTTON (not Alt-Tab from the window itself), or pass -Aumid explicitly.'
+        $wait = 30
+        $ids  = @()
+        $deadline = (Get-Date).AddSeconds($wait)
+        while ($ids.Count -eq 0 -and (Get-Date) -lt $deadline) {
+            Start-Sleep -Milliseconds 500
+            $procIds = @(Get-InstanceProcessIds $target)
+            if ($procIds.Count -gt 0) { $ids = @([CmWindowV1]::Get([uint32[]]$procIds)) }
+        }
+        if ($ids.Count -eq 0) {
+            Die "no $Name window appeared within $wait seconds. Open it from its shortcut and run this again, or pass -Aumid explicitly."
         }
 
-        $changed = @($changed | Sort-Object Delta -Descending)
-        if ($changed.Count -gt 1) {
-            Warn 'more than one AUMID incremented:'
-            $changed | ForEach-Object { Write-Host "    +$($_.Delta)  $($_.Id)" }
-            Warn "picking the highest: $($changed[0].Id)"
-            Warn 'if that looks wrong, close other Chrome windows and rerun, or pass -Aumid.'
+        # Installed web apps and DevTools open windows under AUMIDs of their
+        # own; the browser window is the one the shortcut has to match.
+        $browserIds = @($ids | Where-Object { $_ -notmatch '\._crx_|\.DevToolsApp' })
+        if ($browserIds.Count -gt 0) { $ids = $browserIds }
+        if ($ids.Count -gt 1) {
+            # One browser AUMID per open profile. Instances made here only have Default.
+            Warn "$Name has windows open for more than one profile:"
+            $ids | ForEach-Object { Write-Host "    $_" }
+            $def = @($ids | Where-Object { $_ -like '*.Default' })
+            if ($def.Count -gt 0) { $ids = $def }
+            Warn "using $($ids[0]) - pass -Aumid to choose another"
         }
-        $Aumid = $changed[0].Id
-        Ok "captured AUMID: $Aumid (+$($changed[0].Delta) switches)"
+        $Aumid = $ids[0]
+        Ok "AUMID from the $Name window: $Aumid"
     }
 
     [CmLnkV1]::Set($lnk, $Aumid)
@@ -1927,7 +1994,7 @@ function Invoke-MenuMigrate {
     if (-not $res) { return }
 
     Write-Host ''
-    if (Read-YesNo 'set the taskbar icon for this instance now (needs a few clicks)?' $true) {
+    if (Read-YesNo 'set the taskbar icon for this instance now (opens it once)?' $true) {
         Set-TaskbarIdentity -Name $res.Name -Root $Root -Shortcut $res.Shortcut
         Write-Host ''
         if (Read-YesNo 'also add it to the Start menu?' $true) {

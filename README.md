@@ -136,7 +136,7 @@ new folder and the shortcut.
 | `-IncludePreferences` | Carry settings over, extension block stripped |
 | `-Icon <path>` | Use your own image instead of the lettered disc |
 | `-SetIcon` | Replace an existing instance's icon |
-| `-SetTaskbarIcon` | Capture the AUMID and write it onto the shortcut |
+| `-SetTaskbarIcon` | Read the AUMID off the instance's window and write it onto the shortcut |
 | `-StartMenu` | Install an AUMID-free copy for Start |
 | `-ShowAumid` | Print the AUMID currently on the shortcut |
 | `-NoShortcut` / `-ShortcutPath` | Skip or relocate the shortcut |
@@ -316,9 +316,15 @@ federated logins ("Sign in with Google"), which hold no password by design.
 An older copy ran earlier in the same PowerShell session and .NET cannot unload a
 type. **Open a new PowerShell window.**
 
-**`no new AUMID recorded`**
-Windows records an AUMID only on a genuine user switch. Switch to the window via
-its **taskbar button**, not Alt-Tab from within the window, two or three times.
+**`nothing incremented` when setting the taskbar icon**
+That is 1.2 or earlier, which waited for Explorer's taskbar-switch counters to
+move after you clicked the window — and those often did not. The current version
+reads the AUMID straight off the instance's window and needs no clicks.
+
+**`no <name> window appeared within 30 seconds`**
+The instance did not open, or is running on a different folder than
+`<Root>\<Name>`. Open it from its desktop shortcut and run `-SetTaskbarIcon`
+again — an instance that is already running is read without relaunching it.
 
 **Taskbar still shows the Chrome logo**
 The pinned `.lnk` is a copy. Unpin, re-run `-SetTaskbarIcon`, re-pin, and launch
@@ -374,6 +380,9 @@ Windows 10 Pro and Windows 11 Pro, PowerShell 5.1.
 * Maxthon (portable and installed) and Blisk detected and migrated end to end
   against their on-disk layouts rebuilt in a sandbox — not yet against the real
   browsers
+* `-SetTaskbarIcon` confirmed to write exactly the AUMID the instance's window
+  reports, with no clicks — for an instance not yet running, one already
+  running, and `bob` next to `bob2`
 
 ---
 
