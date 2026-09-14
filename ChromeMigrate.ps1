@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Chrome Profile Migrator 1.0 - moves a profile out of any Chromium-based
+    Chrome Profile Migrator 1.2 - moves a profile out of any Chromium-based
     browser into an isolated Chrome instance backed by its own --user-data-dir,
     then gives that instance its own taskbar button and Start menu entry.
 
@@ -13,7 +13,7 @@
     reachable from the command line - see the parameter list.
 
     Sources: Sidekick, Edge, Brave, Vivaldi, Yandex, Opera, Opera GX,
-    Cent Browser, SRWare Iron, Comodo Dragon, Chromium.
+    Cent Browser, SRWare Iron, Comodo Dragon, Maxthon, Blisk, Chromium.
     Chrome itself is deliberately absent - it is the destination.
 
     Moved automatically:
@@ -152,7 +152,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$SCRIPT_VERSION = '1.1'
+$SCRIPT_VERSION = '1.2'
 $SCRIPT_HOME    = 'https://github.com/steathy/chrome-migration'
 $SCRIPT_URL     = 'https://raw.githubusercontent.com/steathy/chrome-migration/main/ChromeMigrate.ps1'
 
@@ -259,6 +259,19 @@ $BROWSERS = @(
              "$LA\SRWare Iron\chrome.exe") }
     @{ Name='Dragon';      UserData=@("$LA\Comodo\Dragon\User Data");
        Exe=@("$PF\Comodo\Dragon\dragon.exe","$PX\Comodo\Dragon\dragon.exe") }
+    # Maxthon's portable zip unpacks to a MaxthonPortable folder and keeps
+    # User Data beside Maxthon.exe. The installer puts User Data INSIDE
+    # Application, not next to it as other Chromium builds do. Both lists try
+    # portable first, so with both present the portable pair is the one used.
+    # A portable copy anywhere else: pass -SourceUserData.
+    @{ Name='Maxthon';
+       UserData=@("$PF\MaxthonPortable\User Data","$PX\MaxthonPortable\User Data",
+                  "$LA\Maxthon\Application\User Data");
+       Exe=@("$PF\MaxthonPortable\Maxthon.exe","$PX\MaxthonPortable\Maxthon.exe",
+             "$LA\Maxthon\Application\Maxthon.exe",
+             "$PF\Maxthon\Application\Maxthon.exe","$PX\Maxthon\Application\Maxthon.exe") }
+    @{ Name='Blisk';       UserData=@("$LA\Blisk\User Data");
+       Exe=@("$LA\Blisk\Application\blisk.exe","$PF\Blisk\Application\blisk.exe","$PX\Blisk\Application\blisk.exe") }
     @{ Name='Chromium';    UserData=@("$LA\Chromium\User Data");
        Exe=@("$PF\Chromium\Application\chrome.exe","$LA\Chromium\Application\chrome.exe") }
 )
@@ -1558,9 +1571,12 @@ function Invoke-Migration {
     if (-not $NoShortcut) {
         $iconDir = Join-Path $Root '_icons'
         New-Item -ItemType Directory -Force -Path $iconDir | Out-Null
-        $icon = Join-Path $iconDir "$Name.ico"
-        if ($Icon) { Convert-ImageToInstanceIcon -SourceImage $Icon -Path $icon }
-        else       { New-InstanceIcon -Text $Name -Path $icon -Color (Get-NameColor $Name) }
+        # Not $icon: PowerShell variable names ignore case, so that would be the
+        # -Icon parameter itself - overwritten with the file about to be written,
+        # which then reads as a user-supplied picture that does not exist yet.
+        $icoPath = Join-Path $iconDir "$Name.ico"
+        if ($Icon) { Convert-ImageToInstanceIcon -SourceImage $Icon -Path $icoPath }
+        else       { New-InstanceIcon -Text $Name -Path $icoPath -Color (Get-NameColor $Name) }
         $lnkDir = $ShortcutPath
         if (-not $lnkDir) { $lnkDir = [Environment]::GetFolderPath('Desktop') }
         New-Item -ItemType Directory -Force -Path $lnkDir | Out-Null
@@ -1568,7 +1584,7 @@ function Invoke-Migration {
         $s = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
         $s.TargetPath       = $ChromePath
         $s.Arguments        = "--user-data-dir=`"$target`" --no-first-run --no-default-browser-check"
-        $s.IconLocation     = "$icon,0"
+        $s.IconLocation     = "$icoPath,0"
         $s.WorkingDirectory = Split-Path $ChromePath -Parent
         $s.Description      = "Isolated Chrome instance: $Name (from $($B.Name))"
         $s.Save()

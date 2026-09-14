@@ -207,7 +207,7 @@ quick way to bring older instances up to the multi-size format.
 ## Supported sources
 
 Sidekick, Edge, Brave, Vivaldi, Opera, Opera GX, Cent Browser, SRWare Iron,
-Comodo Dragon, Chromium — and Yandex with a caveat.
+Comodo Dragon, Maxthon, Blisk, Chromium — and Yandex with a caveat.
 
 **Chrome is not a source.** It is the destination, and Chrome-to-Chrome is just a
 folder copy.
@@ -226,6 +226,12 @@ Real per-browser differences the script handles:
   `-List` prints a `NOTE:` when two installed browsers genuinely conflict. A
   profile whose browser was uninstalled is still listed, so orphaned data stays
   reachable.
+* **Maxthon** ships as a portable zip as well as an installer, and the two keep
+  their profile in different places: the portable build beside `Maxthon.exe`
+  (`C:\Program Files\MaxthonPortable\User Data`), the installed one *inside* its
+  `Application` folder (`%LOCALAPPDATA%\Maxthon\Application\User Data`) rather
+  than next to it. Both are detected. A portable copy unpacked anywhere else
+  needs `-SourceUserData`.
 * **Vivaldi** writes a `Local State` that Windows PowerShell's `ConvertFrom-Json`
   rejects — it throws on empty and case-duplicate property names. The os_crypt
   key is read with a tolerant parser plus a text fallback.
@@ -365,6 +371,9 @@ Windows 10 Pro and Windows 11 Pro, PowerShell 5.1.
   on, and on none of them for a closed browser
 * Generated ICOs confirmed to carry all seven frames, with Windows resolving
   16/32/48 to exact matches
+* Maxthon (portable and installed) and Blisk detected and migrated end to end
+  against their on-disk layouts rebuilt in a sandbox — not yet against the real
+  browsers
 
 ---
 
